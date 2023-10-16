@@ -1,4 +1,5 @@
 import { writable, derived } from "svelte/store"
+import { Helpers } from "@budibase/bbui"
 
 export const createContextStore = oldContext => {
   const newContext = writable({})
@@ -9,7 +10,9 @@ export const createContextStore = oldContext => {
     for (let i = 0; i < $contexts.length - 1; i++) {
       key += $contexts[i].key
     }
-    key += JSON.stringify($contexts[$contexts.length - 1])
+    key = Helpers.hashString(
+      key + JSON.stringify($contexts[$contexts.length - 1])
+    )
 
     // Reduce global state
     const reducer = (total, context) => ({ ...total, ...context })

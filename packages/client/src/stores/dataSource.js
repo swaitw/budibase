@@ -1,5 +1,7 @@
 import { writable, get } from "svelte/store"
-import { fetchTableDefinition } from "../api"
+import { API } from "api"
+import { FieldTypes } from "../constants"
+import { routeStore } from "./routes"
 
 export const createDataSourceStore = () => {
   const store = writable([])
@@ -16,11 +18,13 @@ export const createDataSourceStore = () => {
     // Extract table ID
     if (dataSource.type === "table" || dataSource.type === "view") {
       dataSourceId = dataSource.tableId
+    } else if (dataSource.type === "viewV2") {
+      dataSourceId = dataSource.id
     }
 
     // Only one side of the relationship is required as a trigger, as it will
     // automatically invalidate related table IDs
-    else if (dataSource.type === "link") {
+    else if (dataSource.type === FieldTypes.LINK) {
       dataSourceId = dataSource.tableId || dataSource.rowTableId
     }
 
@@ -52,27 +56,43 @@ export const createDataSourceStore = () => {
 
   // Invalidates a specific dataSource ID by refreshing all instances
   // which depend on data from that dataSource
-  const invalidateDataSource = async dataSourceId => {
+  const invalidateDataSource = async (dataSourceId, options) => {
     if (!dataSourceId) {
       return
     }
 
+    // Merge default options
+    options = {
+      invalidateRelationships: false,
+      ...options,
+    }
+
     // Emit this as a window event, so parent screens which are iframing us in
     // can also invalidate the same datasource
-    window.parent.postMessage({
-      type: "close-screen-modal",
-      detail: { dataSourceId },
-    })
+    const inModal = get(routeStore).queryParams?.peek
+    if (inModal) {
+      window.parent.postMessage({
+        type: "invalidate-datasource",
+        detail: { dataSourceId, options },
+      })
+    }
 
     let invalidations = [dataSourceId]
 
     // Fetch related table IDs from table schema
-    const definition = await fetchTableDefinition(dataSourceId)
-    const schema = definition?.schema
+    let schema
+    if (options.invalidateRelationships && !dataSourceId?.includes("view_")) {
+      try {
+        const definition = await API.fetchTableDefinition(dataSourceId)
+        schema = definition?.schema
+      } catch (error) {
+        schema = null
+      }
+    }
     if (schema) {
       Object.values(schema).forEach(fieldSchema => {
         if (
-          fieldSchema.type === "link" &&
+          fieldSchema.type === FieldTypes.LINK &&
           fieldSchema.tableId &&
           !fieldSchema.autocolumn
         ) {

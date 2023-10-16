@@ -11,7 +11,6 @@
     Icon,
   } from "@budibase/bbui"
   import { tables, views } from "stores/backend"
-  import analytics, { Events } from "analytics"
 
   const CONDITIONS = [
     {
@@ -69,13 +68,15 @@
     ({ _id }) => _id === $views.selected?.tableId
   )
   $: fields = viewTable && Object.keys(viewTable.schema)
+  $: schema = viewTable && viewTable.schema ? viewTable.schema : {}
 
   function saveView() {
-    views.save(view)
-    notifications.success(`View ${view.name} saved.`)
-    analytics.captureEvent(Events.VIEW.ADDED_FILTER, {
-      filters: JSON.stringify(view.filters),
-    })
+    try {
+      views.save(view)
+      notifications.success(`View ${view.name} saved`)
+    } catch (error) {
+      notifications.error("Error saving view")
+    }
   }
 
   function removeFilter(idx) {
@@ -90,29 +91,29 @@
 
   function isMultipleChoice(field) {
     return (
-      viewTable.schema[field]?.constraints?.inclusion?.length ||
-      viewTable.schema[field]?.type === "boolean"
+      schema[field]?.constraints?.inclusion?.length ||
+      schema[field]?.type === "boolean"
     )
   }
 
   function fieldOptions(field) {
-    return viewTable.schema[field]?.type === "options"
-      ? viewTable.schema[field]?.constraints.inclusion
+    return schema[field]?.type === "options" || schema[field]?.type === "array"
+      ? schema[field]?.constraints.inclusion
       : [true, false]
   }
 
   function isDate(field) {
-    return viewTable.schema[field]?.type === "datetime"
+    return schema[field]?.type === "datetime"
   }
 
   function isNumber(field) {
-    return viewTable.schema[field]?.type === "number"
+    return schema[field]?.type === "number"
   }
 
   const fieldChanged = filter => ev => {
     // Reset if type changed
-    const oldType = viewTable.schema[filter.key]?.type
-    const newType = viewTable.schema[ev.detail]?.type
+    const oldType = schema[filter.key]?.type
+    const newType = schema[ev.detail]?.type
     if (filter.key && ev.detail && oldType !== newType) {
       filter.value = ""
     }
@@ -157,7 +158,7 @@
             <Select
               bind:value={filter.value}
               options={fieldOptions(filter.key)}
-              getOptionLabel={x => x.toString()}
+              getOptionLabel={x => x?.toString() || ""}
             />
           {:else if filter.key && isDate(filter.key)}
             <DatePicker

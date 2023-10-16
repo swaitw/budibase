@@ -17,63 +17,71 @@
   const formContext = getContext("form")
   const formStepContext = getContext("form-step")
   const fieldGroupContext = getContext("field-group")
-  const { styleable } = getContext("sdk")
+  const { styleable, builderStore } = getContext("sdk")
   const component = getContext("component")
 
   // Register field with form
   const formApi = formContext?.formApi
   const labelPos = fieldGroupContext?.labelPosition || "above"
-  const formField = formApi?.registerField(
+  $: formStep = formStepContext ? $formStepContext || 1 : 1
+  $: formField = formApi?.registerField(
     field,
     type,
     defaultValue,
     disabled,
     validation,
-    formStepContext || 1
+    formStep
   )
 
+  $: schemaType =
+    fieldSchema?.type !== "formula" && fieldSchema?.type !== "bigint"
+      ? fieldSchema?.type
+      : "string"
+
+  // Focus label when editing
+  let labelNode
+  $: $component.editing && labelNode?.focus()
+
   // Update form properties in parent component on every store change
-  const unsubscribe = formField?.subscribe(value => {
+  $: unsubscribe = formField?.subscribe(value => {
     fieldState = value?.fieldState
     fieldApi = value?.fieldApi
     fieldSchema = value?.fieldSchema
   })
-  onDestroy(() => unsubscribe?.())
-
-  // Keep field state up to date with props which might change due to
-  // conditional UI
-  $: updateValidation(validation)
-  $: updateDisabled(disabled)
 
   // Determine label class from position
   $: labelClass = labelPos === "above" ? "" : `spectrum-FieldLabel--${labelPos}`
 
-  const updateValidation = validation => {
-    fieldApi?.updateValidation(validation)
+  const updateLabel = e => {
+    builderStore.actions.updateProp("label", e.target.textContent)
   }
 
-  const updateDisabled = disabled => {
-    fieldApi?.setDisabled(disabled)
-  }
+  onDestroy(() => {
+    fieldApi?.deregister()
+    unsubscribe?.()
+  })
 </script>
 
 <FieldGroupFallback>
   <div class="spectrum-Form-item" use:styleable={$component.styles}>
-    <label
-      class:hidden={!label}
-      for={fieldState?.fieldId}
-      class={`spectrum-FieldLabel spectrum-FieldLabel--sizeM spectrum-Form-itemLabel ${labelClass}`}
-    >
-      {label || ""}
-    </label>
+    {#key $component.editing}
+      <label
+        bind:this={labelNode}
+        contenteditable={$component.editing}
+        on:blur={$component.editing ? updateLabel : null}
+        class:hidden={!label}
+        for={fieldState?.fieldId}
+        class={`spectrum-FieldLabel spectrum-FieldLabel--sizeM spectrum-Form-itemLabel ${labelClass}`}
+      >
+        {label || " "}
+      </label>
+    {/key}
     <div class="spectrum-Form-itemField">
       {#if !formContext}
         <Placeholder text="Form components need to be wrapped in a form" />
       {:else if !fieldState}
-        <Placeholder
-          text="Add the Field setting to start using your component"
-        />
-      {:else if fieldSchema?.type && fieldSchema?.type !== type && type !== "options"}
+        <Placeholder />
+      {:else if schemaType && schemaType !== type && !["options", "longform"].includes(type)}
         <Placeholder
           text="This Field setting is the wrong data type for this component"
         />
@@ -94,12 +102,10 @@
   label.hidden {
     padding: 0;
   }
-
   .spectrum-Form-itemField {
     position: relative;
     width: 100%;
   }
-
   .error {
     color: var(
       --spectrum-semantic-negative-color-default,
@@ -108,7 +114,6 @@
     font-size: var(--spectrum-global-dimension-font-size-75);
     margin-top: var(--spectrum-global-dimension-size-75);
   }
-
   .spectrum-FieldLabel--right,
   .spectrum-FieldLabel--left {
     padding-right: var(--spectrum-global-dimension-size-200);

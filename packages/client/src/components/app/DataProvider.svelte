@@ -1,13 +1,7 @@
 <script>
   import { getContext } from "svelte"
-  import { ProgressCircle, Pagination } from "@budibase/bbui"
-  import {
-    buildLuceneQuery,
-    luceneQuery,
-    luceneSort,
-    luceneLimit,
-  } from "builder/src/helpers/lucene"
-  import Placeholder from "./Placeholder.svelte"
+  import { Pagination, ProgressCircle } from "@budibase/bbui"
+  import { fetchData, LuceneUtils } from "@budibase/frontend-core"
 
   export let dataSource
   export let filter
@@ -16,237 +10,153 @@
   export let limit
   export let paginate
 
-  const { API, styleable, Provider, ActionTypes } = getContext("sdk")
+  const { styleable, Provider, ActionTypes, API } = getContext("sdk")
   const component = getContext("component")
 
-  // Loading flag every time data is being fetched
-  let loading = false
+  // We need to manage our lucene query manually as we want to allow components
+  // to extend it
+  let queryExtensions = {}
+  $: defaultQuery = LuceneUtils.buildLuceneQuery(filter)
+  $: query = extendQuery(defaultQuery, queryExtensions)
 
-  // Loading flag for the initial load
-  // Mark as loaded if we have no datasource so we don't stall forever
-  let loaded = !dataSource
-  let schemaLoaded = false
+  // Fetch data and refresh when needed
+  $: fetch = createFetch(dataSource)
+  $: fetch.update({
+    query,
+    sortColumn,
+    sortOrder,
+    limit,
+    paginate,
+  })
 
-  // Provider state
-  let rows = []
-  let allRows = []
-  let schema = {}
-  let bookmarks = [null]
-  let pageNumber = 0
-  let query = null
+  // Sanitize schema to remove hidden fields
+  $: schema = sanitizeSchema($fetch.schema)
 
-  $: query = buildLuceneQuery(filter)
-  $: internalTable = dataSource?.type === "table"
-  $: nestedProvider = dataSource?.type === "provider"
-  $: hasNextPage = bookmarks[pageNumber + 1] != null
-  $: hasPrevPage = pageNumber > 0
-  $: getSchema(dataSource)
-  $: sortType = getSortType(schema, sortColumn)
-  $: {
-    // Wait until schema loads before loading data, so that we can determine
-    // the correct sort type first time
-    if (schemaLoaded) {
-      fetchData(
-        dataSource,
-        query,
-        limit,
-        sortColumn,
-        sortOrder,
-        sortType,
-        paginate
-      )
-    }
-  }
-  $: {
-    if (internalTable) {
-      // Internal tables are already processed server-side
-      rows = allRows
-    } else {
-      // For anything else we use client-side implementations to filter, sort
-      // and limit
-      const filtered = luceneQuery(allRows, query)
-      const sorted = luceneSort(filtered, sortColumn, sortOrder, sortType)
-      rows = luceneLimit(sorted, limit)
-    }
-  }
+  // Build our action context
   $: actions = [
     {
       type: ActionTypes.RefreshDatasource,
-      callback: () => refresh(),
+      callback: () => fetch.refresh(),
       metadata: { dataSource },
     },
     {
-      type: ActionTypes.SetDataProviderQuery,
-      callback: newQuery => (query = newQuery),
+      type: ActionTypes.AddDataProviderQueryExtension,
+      callback: addQueryExtension,
+    },
+    {
+      type: ActionTypes.RemoveDataProviderQueryExtension,
+      callback: removeQueryExtension,
+    },
+    {
+      type: ActionTypes.SetDataProviderSorting,
+      callback: ({ column, order }) => {
+        let newOptions = {}
+        if (column) {
+          newOptions.sortColumn = column
+        }
+        if (order) {
+          newOptions.sortOrder = order
+        }
+        if (Object.keys(newOptions)?.length) {
+          fetch.update(newOptions)
+        }
+      },
     },
   ]
+
+  // Build our data context
   $: dataContext = {
-    rows,
+    rows: $fetch.rows,
+    info: $fetch.info,
+    datasource: dataSource || {},
     schema,
-    rowsLength: rows.length,
+    rowsLength: $fetch.rows.length,
 
     // Undocumented properties. These aren't supposed to be used in builder
     // bindings, but are used internally by other components
     id: $component?.id,
-    state: { query },
-    loaded,
+    state: {
+      query: $fetch.query,
+      sortColumn: $fetch.sortColumn,
+      sortOrder: $fetch.sortOrder,
+    },
+    limit,
   }
 
-  const getSortType = (schema, sortColumn) => {
-    if (!schema || !sortColumn || !schema[sortColumn]) {
-      return "string"
-    }
-    const type = schema?.[sortColumn]?.type
-    return type === "number" ? "number" : "string"
-  }
-
-  const refresh = async () => {
-    if (schemaLoaded && !nestedProvider) {
-      fetchData(
-        dataSource,
+  const createFetch = datasource => {
+    return fetchData({
+      API,
+      datasource,
+      options: {
         query,
-        limit,
         sortColumn,
         sortOrder,
-        sortType,
-        paginate
-      )
-    }
-  }
-
-  const fetchData = async (
-    dataSource,
-    query,
-    limit,
-    sortColumn,
-    sortOrder,
-    sortType,
-    paginate
-  ) => {
-    loading = true
-    if (dataSource?.type === "table") {
-      // For internal tables we use server-side processing
-      const res = await API.searchTable({
-        tableId: dataSource.tableId,
-        query,
         limit,
-        sort: sortColumn,
-        sortOrder: sortOrder?.toLowerCase() ?? "ascending",
-        sortType,
         paginate,
+      },
+    })
+  }
+
+  const sanitizeSchema = schema => {
+    if (!schema) {
+      return schema
+    }
+    let cloned = { ...schema }
+    Object.entries(cloned).forEach(([field, fieldSchema]) => {
+      if (fieldSchema.visible === false) {
+        delete cloned[field]
+      }
+    })
+    return cloned
+  }
+
+  const addQueryExtension = (key, extension) => {
+    if (!key || !extension) {
+      return
+    }
+    queryExtensions = { ...queryExtensions, [key]: extension }
+  }
+
+  const removeQueryExtension = key => {
+    if (!key) {
+      return
+    }
+    const newQueryExtensions = { ...queryExtensions }
+    delete newQueryExtensions[key]
+    queryExtensions = newQueryExtensions
+  }
+
+  const extendQuery = (defaultQuery, extensions) => {
+    const extensionValues = Object.values(extensions || {})
+    let extendedQuery = { ...defaultQuery }
+    extensionValues.forEach(extension => {
+      Object.entries(extension || {}).forEach(([operator, fields]) => {
+        extendedQuery[operator] = {
+          ...extendedQuery[operator],
+          ...fields,
+        }
       })
-      pageNumber = 0
-      allRows = res.rows
-      if (res.hasNextPage) {
-        bookmarks = [null, res.bookmark]
-      } else {
-        bookmarks = [null]
-      }
-    } else if (dataSource?.type === "provider") {
-      // For providers referencing another provider, just use the rows it
-      // provides
-      allRows = dataSource?.value?.rows ?? []
-    } else {
-      // For other data sources like queries or views, fetch all rows from the
-      // server
-      allRows = await API.fetchDatasource(dataSource)
-    }
-    loading = false
-    loaded = true
-  }
-
-  const getSchema = async dataSource => {
-    if (dataSource?.schema) {
-      schema = dataSource.schema
-    } else if (dataSource?.tableId) {
-      const definition = await API.fetchTableDefinition(dataSource.tableId)
-      schema = definition?.schema ?? {}
-    } else if (dataSource?.type === "provider") {
-      schema = dataSource.value?.schema ?? {}
-    } else {
-      schema = {}
-    }
-
-    // Ensure there are "name" properties for all fields and that field schema
-    // are objects
-    let fixedSchema = {}
-    Object.entries(schema || {}).forEach(([fieldName, fieldSchema]) => {
-      if (typeof fieldSchema === "string") {
-        fixedSchema[fieldName] = {
-          type: fieldSchema,
-          name: fieldName,
-        }
-      } else {
-        fixedSchema[fieldName] = {
-          ...fieldSchema,
-          name: fieldName,
-        }
-      }
     })
-    schema = fixedSchema
-    schemaLoaded = true
-  }
-
-  const nextPage = async () => {
-    if (!hasNextPage || !internalTable) {
-      return
-    }
-    const res = await API.searchTable({
-      tableId: dataSource?.tableId,
-      query,
-      bookmark: bookmarks[pageNumber + 1],
-      limit,
-      sort: sortColumn,
-      sortOrder: sortOrder?.toLowerCase() ?? "ascending",
-      sortType,
-      paginate: true,
-    })
-    pageNumber++
-    allRows = res.rows
-    if (res.hasNextPage) {
-      bookmarks[pageNumber + 1] = res.bookmark
-    }
-  }
-
-  const prevPage = async () => {
-    if (!hasPrevPage || !internalTable) {
-      return
-    }
-    const res = await API.searchTable({
-      tableId: dataSource?.tableId,
-      query,
-      bookmark: bookmarks[pageNumber - 1],
-      limit,
-      sort: sortColumn,
-      sortOrder: sortOrder?.toLowerCase() ?? "ascending",
-      sortType,
-      paginate: true,
-    })
-    pageNumber--
-    allRows = res.rows
+    return extendedQuery
   }
 </script>
 
 <div use:styleable={$component.styles} class="container">
   <Provider {actions} data={dataContext}>
-    {#if !loaded}
+    {#if !$fetch.loaded}
       <div class="loading">
         <ProgressCircle />
       </div>
     {:else}
-      {#if !$component.children}
-        <Placeholder />
-      {:else}
-        <slot />
-      {/if}
-      {#if paginate && internalTable}
+      <slot />
+      {#if paginate && $fetch.supportsPagination}
         <div class="pagination">
           <Pagination
-            page={pageNumber + 1}
-            {hasPrevPage}
-            {hasNextPage}
-            goToPrevPage={prevPage}
-            goToNextPage={nextPage}
+            page={$fetch.pageNumber + 1}
+            hasPrevPage={$fetch.hasPrevPage}
+            hasNextPage={$fetch.hasNextPage}
+            goToPrevPage={fetch.prevPage}
+            goToNextPage={fetch.nextPage}
           />
         </div>
       {/if}

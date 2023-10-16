@@ -1,15 +1,18 @@
 <script>
   import { getContext, setContext } from "svelte"
+  import { writable } from "svelte/store"
   import Placeholder from "../Placeholder.svelte"
 
   export let step = 1
 
-  const { styleable, builderStore } = getContext("sdk")
+  const { styleable, builderStore, componentStore } = getContext("sdk")
   const component = getContext("component")
   const formContext = getContext("form")
 
   // Set form step context so fields know what step they are within
-  setContext("form-step", step || 1)
+  const stepStore = writable(step || 1)
+  $: stepStore.set(step || 1)
+  setContext("form-step", stepStore)
 
   $: formState = formContext?.formState
   $: currentStep = $formState?.currentStep
@@ -19,7 +22,7 @@
     if (
       formContext &&
       $builderStore.inBuilder &&
-      $builderStore.selectedComponentPath?.includes($component.id)
+      $componentStore.selectedComponentPath?.includes($component.id)
     ) {
       formContext.formApi.setStep(step)
     }
